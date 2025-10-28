@@ -18,7 +18,7 @@ try {
     Write-Host "Execution Policy: $(Get-ExecutionPolicy)" -ForegroundColor Yellow
     Write-Host "Profile path: $PROFILE" -ForegroundColor Green
 } catch {}
-# === /ÚKOL 2 ===
+
 "@ | Add-Content -Path $PROFILE
 
     Write-Host "Kód pro výpis EP a cesty byl přidán do profilu." -ForegroundColor Green
