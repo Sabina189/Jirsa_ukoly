@@ -49,14 +49,14 @@ try {
 }
 catch { Write-Warning "Chyba při zpracování disku C:: $_" }
 
-# 3) Nepoužité účty
+# 3) Nepoužité účty 
 Write-Host "[3/4] Vyhledávám účty, které se nikdy nepřihlásily..."
 try {
-    $profiles = Get-CimInstance -ClassName Win32_NetworkLoginProfile -ErrorAction Stop | Where-Object { $_.Local -eq $true }
-    $never = $profiles | Where-Object { -not $_.LastLogon } | Select-Object Name,FullName,LastLogon
+    $users = Get-LocalUser | Where-Object { -not $_.LastLogon }
+    $never = $users | Select-Object Name, Enabled, LastLogon
     $never | Export-Csv -Path (Join-Path $ExportPath 'local_never_loggedon.csv') -NoTypeInformation
 }
-catch { Write-Warning "Chyba při čtení Win32_NetworkLoginProfile: $_" }
+catch { Write-Warning "Chyba při čtení Get-LocalUser: $_" }
 
 # 4) Uzamčené účty 
 Write-Host "[4/4] Vyhledávám uzamčené účty..."
