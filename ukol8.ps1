@@ -1,76 +1,122 @@
-$regPaths = @(
-    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
-    "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
-)
 
-$regApps = foreach ($path in $regPaths) {
-    if (Test-Path $path) {
-        Get-ChildItem $path | ForEach-Object {
-            $p = Get-ItemProperty $_.PSPath
-            if ($p.DisplayName) {
-                [PSCustomObject]@{
-                    Name = $p.DisplayName
-                    Version = $p.DisplayVersion
-                    Publisher = $p.Publisher
-                    InstallLocation = $p.InstallLocation
-                    Source = "Registry"
+function Get-InstalledPrograms {
+    param(
+        [switch]$IncludeSystemComponents  # Přidá i systémové komponenty, které jsou normálně skryté
+    )
+
+    $programs = @()
+
+    $registryPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+
+    foreach ($path in $registryPaths) {
+        Write-Host "Načítám programy z registru: $path" -ForegroundColor Cyan
+        try {
+            Get-ItemProperty -Path $path -ErrorAction Stop | ForEach-Object {
+                $props = $_
+
+                if ($props.DisplayName) {
+                    if (-not $IncludeSystemComponents) {
+                        # Přeskočíme systémové komponenty
+                        if ($props.SystemComponent -eq 1 -or $props.ReleaseType -eq "Security Update" -or $props.ParentKeyName) {
+                            return
+                        }
+                    }
+
+                    $program = [PSCustomObject]@{
+                        Name         = $props.DisplayName
+                        Version      = $props.DisplayVersion
+                        Publisher    = $props.Publisher
+                        InstallDate  = $props.InstallDate
+                        Source       = if ($path -like "*WOW6432Node*") { "Registry (32bit)" } else { "Registry (64bit/CurrentUser)" }
+                    }
+
+                    $programs += $program
                 }
             }
         }
+        catch {
+            Write-Warning "Nelze číst z cesty v registru: $path. Chyba: $_"
+        }
     }
-}
 
-function Resolve-Lnk($p) {
+    # Získání informací o aplikacích z Get-Package (PowerShell balíčky)
+    Write-Host "Načítám balíčky z Get-Package..." -ForegroundColor Cyan
     try {
-        $w = New-Object -ComObject WScript.Shell
-        $s = $w.CreateShortcut($p)
-        return $s.TargetPath
-    } catch { return $null }
-}
-
-$startPaths = @(
-    "$env:ProgramData\Microsoft\Windows\Start Menu\Programs",
-    "$env:AppData\Microsoft\Windows\Start Menu\Programs"
-)
-
-$lnkApps = foreach ($sp in $startPaths) {
-    if (Test-Path $sp) {
-        Get-ChildItem $sp -Recurse -Filter *.lnk | ForEach-Object {
-            $target = Resolve-Lnk $_.FullName
-            if ($target -and (Test-Path $target)) {
-                $v = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($target)
-                [PSCustomObject]@{
-                    Name = $v.ProductName ?? $_.BaseName
-                    Version = $v.ProductVersion
-                    Publisher = $v.CompanyName
-                    InstallLocation = Split-Path $target
-                    Source = "StartMenu"
-                }
+        Get-Package -ErrorAction Stop | ForEach-Object {
+            $program = [PSCustomObject]@{
+                Name         = $_.Name
+                Version      = $_.Version
+                Publisher    = $_.ProviderName
+                InstallDate  = $null
+                Source       = "Get-Package"
             }
+            $programs += $program
         }
     }
+    catch {
+        Write-Warning "Nelze načíst balíčky přes Get-Package. Chyba: $_"
+    }
+
+    # Odebrání duplicit podle názvu a verze
+    $uniquePrograms = $programs | Sort-Object Name, Version -Unique
+
+    return $uniquePrograms
 }
 
-$uwpApps = Get-AppxPackage | ForEach-Object {
-    [PSCustomObject]@{
-        Name = $_.Name
-        Version = $_.Version
-        Publisher = $_.Publisher
-        InstallLocation = $_.InstallLocation
-        Source = "UWP"
+# Hlavní část skriptu
+Write-Host "Zjišťuji seznam nainstalovaných programů..." -ForegroundColor Green
+$installedPrograms = Get-InstalledPrograms
+
+if ($installedPrograms.Count -eq 0) {
+    Write-Host "Nebyl nalezen žádný nainstalovaný program." -ForegroundColor Yellow
+} else {
+    Write-Host "Nalezeno $($installedPrograms.Count) programů." -ForegroundColor Green
+    $installedPrograms | Sort-Object Name | Format-Table -AutoSize
+}
+
+# Možnost filtrování uživatelsky
+Write-Host "`nChcete filtrovat výsledky podle názvu programu? (ano/ne)" -NoNewline
+$response = Read-Host
+
+if ($response -eq "ano") {
+    Write-Host "Zadejte část názvu programu, který hledáte:" -NoNewline
+    $filter = Read-Host
+
+    $filteredPrograms = $installedPrograms | Where-Object { $_.Name -like "*$filter*" }
+
+    if ($filteredPrograms.Count -eq 0) {
+        Write-Host "Nebyly nalezeny žádné programy odpovídající filtru '$filter'." -ForegroundColor Yellow
+    } else {
+        Write-Host "Nalezeno $($filteredPrograms.Count) programů odpovídajících filtru '$filter':" -ForegroundColor Green
+        $filteredPrograms | Sort-Object Name | Format-Table -AutoSize
     }
 }
 
-$all = $regApps + $lnkApps + $uwpApps
+# Export do CSV
+Write-Host "`nChcete exportovat seznam programů do CSV souboru? (ano/ne)" -NoNewline
+$exportResponse = Read-Host
 
-$unique = $all | Group-Object Name, Version | ForEach-Object {
-    $_.Group[0]
-} | Sort-Object Name
+if ($exportResponse -eq "ano") {
+    $defaultPath = "$env:USERPROFILE\Desktop\installed_programs.csv"
+    Write-Host "Zadejte cestu pro export (nebo stiskněte Enter pro výchozí cestu: $defaultPath):" -NoNewline
+    $exportPath = Read-Host
 
-$unique | Format-Table -AutoSize
+    if ([string]::IsNullOrWhiteSpace($exportPath)) {
+        $exportPath = $defaultPath
+    }
 
-$desktop = [Environment]::GetFolderPath("Desktop")
-$path = Join-Path $desktop "software_list.csv"
-$unique | Export-Csv $path -NoTypeInformation -Encoding UTF8
-Write-Host "Seznam uložen do $path"
+    try {
+        $installedPrograms | Export-Csv -Path $exportPath -NoTypeInformation -Encoding UTF8
+        Write-Host "Seznam byl úspěšně exportován do souboru: $exportPath" -ForegroundColor Green
+    }
+    catch {
+        Write-Warning "Nepodařilo se exportovat data do CSV. Chyba: $_"
+    }
+}
+
+Write-Host "`nHotovo. Stiskněte libovolnou klávesu pro ukončení..." -ForegroundColor Cyan
+$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
